@@ -177,7 +177,7 @@ def main():
             should_switch = False
             
             # 正常逻辑
-            # 必须满足最小绿灯时间
+            # 必须满足最小绿灯时间 5s
             if elapsed_time > MIN_GREEN_TIME:
                 # 条件1: 达到最大绿灯时间 (无条件切换)
                 if elapsed_time > MAX_GREEN_TIME:
@@ -193,7 +193,7 @@ def main():
                         if condition_met_start_time == 0:
                             condition_met_start_time = current_time
                         elif current_time - condition_met_start_time > DEBOUNCE_TIME:
-                            # 连续满足去抖动时间，允许切换
+                            # 连续满足去抖动时间，允许切换  拥堵时间超过DEBOUNCE_TIME秒才切换
                             should_switch = True
                             condition_met_start_time = 0 # 重置
                     else:
