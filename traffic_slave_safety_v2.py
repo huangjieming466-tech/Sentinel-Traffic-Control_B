@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import serial
+import json
 import queue
 from collections import deque
 
@@ -58,12 +59,12 @@ from relay_controller import RS485RelayController
 CAMERA_SOURCE = "rtsp://admin:HKcrc3130@192.168.1.64:554/h264/ch1/main/av_stream"
 
 MODEL_PATH = "/home/hkcrc2/Sentinel-Traffic-Control_B/yolov8n.rknn"
-SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG0419BN-if00-port0"
 BAUDRATE = 115200
 
 # RS485 relay board for real B-side traffic light output
-# NOTE: LoRa uses /dev/ttyUSB0, so RS485 relay normally uses /dev/ttyUSB1
-RELAY_PORT = "/dev/ttyUSB1"
+# Use by-id path so USB replug / re-enumeration cannot swap LoRa and relay.
+RELAY_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BH002IVA-if00-port0"
 RELAY_BAUDRATE = 9600
 
 CONF_THRESHOLD = 0.15
@@ -571,11 +572,11 @@ def _fb_advance_from(start_state, elapsed):
 
 _FB_CYCLE = [
     # (state_name,  duration_s,  b_relay)
-    ("GREEN_A",     30.0,        "RED"),
+    ("GREEN_A",     15.0,        "RED"),
     ("YELLOW_A",     3.0,        "RED"),
     ("ALL_RED_A",    15.0,        "RED"),
     ("RED_YELLOW_B", 2.0,        "RED_YELLOW"),
-    ("GREEN_B",     30.0,        "GREEN"),
+    ("GREEN_B",     15.0,        "GREEN"),
     ("YELLOW_B",     3.0,        "YELLOW"),
     ("ALL_RED_B",    15.0,        "RED"),
     ("RED_YELLOW_A", 2.0,        "RED"),
@@ -633,11 +634,12 @@ def main():
     stream_reader = RTSPStreamReader(CAMERA_SOURCE).start()
     time.sleep(1.0)
     if stream_reader.cap is None or not stream_reader.cap.isOpened():
-        print(f"[CAM] Error: cannot open camera {CAMERA_SOURCE}")
-        stream_reader.stop()
-        rknn.release()
-        sys.exit(1)
-    print("[CAM] Camera ready")
+        print(f"[CAM] WARNING: camera not reachable now ({CAMERA_SOURCE})")
+        print("[CAM]         will keep retrying in background; light control continues")
+        # Do NOT exit: the background reader thread keeps reconnecting,
+        # and the main loop keeps driving the traffic lights via fallback.
+    else:
+        print("[CAM] Camera ready")
 
     # ── 3. Init LoRa ──
     print("[LoRa] Initializing serial...")
@@ -663,6 +665,7 @@ def main():
     # ── 4. Main Loop ──
     frame_count = 0
     last_det_send = 0
+    last_status_write = 0
     fps = 0.0
     fps_smooth = deque(maxlen=30)
 
@@ -675,41 +678,10 @@ def main():
 
             # ── Read camera ──
             ret, frame = stream_reader.read_latest()
-            if not ret or frame is None:
-                time.sleep(0.01)
-                continue
-            frame_count += 1
-            ori_h, ori_w = frame.shape[:2]
 
-            # ── NPU inference ──
-            img = cv2.resize(frame, (640, 640))
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = np.expand_dims(img, axis=0)
-            outputs = rknn.inference(inputs=[img])
-            detections = post_processor.process(outputs, ori_w, ori_h)
-
-            # ── Count Road B vehicles ──
-            class_counts = {name: 0 for name in TARGET_CLASS_NAMES}
-            for det in detections:
-                cls_name = det['class']
-                conf_score = det['conf']
-                if cls_name in class_counts:
-                    class_counts[cls_name] += 1
-                    # Draw bounding box
-                    x, y_b, w_box, h_box = det['box']
-                    label = f"{cls_name} {conf_score:.2f}"
-                    cv2.rectangle(frame, (x, y_b), (x + w_box, y_b + h_box), (0, 255, 0), 2)
-                    cv2.putText(frame, label, (x, max(y_b - 10, 20)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            total_count = sum(class_counts.values())
-
-            # ── Send detection to Board A (prime interval to avoid LoRa collision)
+            # ── Light control: ALWAYS run, independent of camera ──
             now = time.time()
-            if now - last_det_send > 0.737:
-                lora.send_detection(class_counts)
-                last_det_send = now
 
-            # ── Get light state from Board A ──
             light_state, light_remaining, light_color, is_green, is_yellow, light_last = \
                 lora.get_light_state()
             light_fresh = lora.is_light_data_fresh()
@@ -764,6 +736,55 @@ def main():
                     relay.set_light("RED_YELLOW")
                 else:
                     relay.set_light("RED")
+
+            # ── Periodically read actual relay status (0.5s) → file ──
+            if now - last_status_write > 0.5:
+                last_status_write = now
+                actual = relay.read_status() if relay is not None else None
+                try:
+                    with open("/tmp/relay_actual.json", "w") as f:
+                        f.write(json.dumps({
+                            "actual": actual,
+                            "state": light_state,
+                            "remaining": light_remaining,
+                            "t": now,
+                        }))
+                except Exception:
+                    pass
+
+            # ── No frame yet / camera down: keep driving lights, skip vision ──
+            if not ret or frame is None:
+                time.sleep(0.01)
+                continue
+            frame_count += 1
+            ori_h, ori_w = frame.shape[:2]
+
+            # ── NPU inference ──
+            img = cv2.resize(frame, (640, 640))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = np.expand_dims(img, axis=0)
+            outputs = rknn.inference(inputs=[img])
+            detections = post_processor.process(outputs, ori_w, ori_h)
+
+            # ── Count Road B vehicles ──
+            class_counts = {name: 0 for name in TARGET_CLASS_NAMES}
+            for det in detections:
+                cls_name = det['class']
+                conf_score = det['conf']
+                if cls_name in class_counts:
+                    class_counts[cls_name] += 1
+                    # Draw bounding box
+                    x, y_b, w_box, h_box = det['box']
+                    label = f"{cls_name} {conf_score:.2f}"
+                    cv2.rectangle(frame, (x, y_b), (x + w_box, y_b + h_box), (0, 255, 0), 2)
+                    cv2.putText(frame, label, (x, max(y_b - 10, 20)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            total_count = sum(class_counts.values())
+
+            # ── Send detection to Board A (prime interval to avoid LoRa collision)
+            if now - last_det_send > 0.737:
+                lora.send_detection(class_counts)
+                last_det_send = now
 
             draw_fresh = True
             frame = draw_slave_display(

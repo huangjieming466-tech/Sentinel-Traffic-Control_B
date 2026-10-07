@@ -221,6 +221,45 @@ class RS485RelayController:
         return success
 
 
+    def read_status(self):
+        """
+        读继电器线圈状态，返回实际灯态字符串。
+        只发功能码 01（读线圈），纯查询，不改变继电器状态。
+
+        Returns:
+            "RED" / "YELLOW" / "GREEN" / "RED_YELLOW" / "OFF"，
+            失败或超时返回 None。
+        """
+        if self.ser is None:
+            return None
+        try:
+            # 清空接收缓冲，避免读到之前写命令的回显
+            self.ser.reset_input_buffer()
+            # 读线圈 0x00-0x07（8 路）
+            self.ser.write(bytes.fromhex("01 01 00 00 00 08 3D CC"))
+            time.sleep(0.05)                # 等继电器处理读命令并回响应
+            self.ser.timeout = 0.3          # 足够超时读完 7 字节
+            resp = self.ser.read(7)         # 读线圈响应固定 7 字节
+            self.ser.timeout = 0.5          # 恢复默认
+            if len(resp) < 5 or resp[0] != 0x01 or resp[1] != 0x01:
+                return None
+            coil = resp[3]  # 8 路线圈状态字节
+            red = bool(coil & 0x01)      # 继电器 0 = 红
+            yellow = bool(coil & 0x02)   # 继电器 1 = 黄
+            green = bool(coil & 0x04)    # 继电器 2 = 绿
+            if red and yellow:
+                return "RED_YELLOW"
+            if green:
+                return "GREEN"
+            if yellow:
+                return "YELLOW"
+            if red:
+                return "RED"
+            return "OFF"
+        except Exception:
+            return None
+
+
     # ============================================================
     # Traffic light high-level API
     # ============================================================
