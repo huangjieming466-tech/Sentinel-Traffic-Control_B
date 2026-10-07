@@ -75,7 +75,7 @@ TARGET_CLASS_IDS = [2, 3, 5, 7]
 TARGET_CLASS_NAMES = ["car", "motorcycle", "bus", "truck"]
 
 # How often to send detection data to Board A (seconds)
-DET_SEND_INTERVAL = 0.5
+DET_SEND_INTERVAL = 0.737
 
 # Maximum age of Board A light command before fallback
 LIGHT_CMD_TIMEOUT = 1.5
