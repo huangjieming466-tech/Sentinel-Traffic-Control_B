@@ -233,17 +233,20 @@ class RS485RelayController:
         if self.ser is None:
             return None
         try:
-            # 清空接收缓冲，避免读到之前写命令的回显
+            # 清空旧缓冲，稍等再清一次（清掉之前写命令的延迟回显）
+            self.ser.reset_input_buffer()
+            time.sleep(0.08)
             self.ser.reset_input_buffer()
             # 读线圈 0x00-0x07（8 路）
             self.ser.write(bytes.fromhex("01 01 00 00 00 08 3D CC"))
-            time.sleep(0.05)                # 等继电器处理读命令并回响应
-            self.ser.timeout = 0.3          # 足够超时读完 7 字节
-            resp = self.ser.read(6)         # 读线圈响应固定 6 字节（地址+功能码+字节数+数据+CRC2）
+            time.sleep(0.3)                 # 等继电器响应（部分继电器较慢）
+            self.ser.timeout = 0.3
+            resp = self.ser.read(16)        # 读足够字节（可能含前导回显）
             self.ser.timeout = 0.5          # 恢复默认
-            if len(resp) < 5 or resp[0] != 0x01 or resp[1] != 0x01:
+            idx = resp.find(b'\x01\x01')    # 定位读线圈响应头
+            if idx < 0 or idx + 6 > len(resp):
                 return None
-            coil = resp[3]  # 8 路线圈状态字节
+            coil = resp[idx + 3]            # 8 路线圈状态字节
             red = bool(coil & 0x01)      # 继电器 0 = 红
             yellow = bool(coil & 0x02)   # 继电器 1 = 黄
             green = bool(coil & 0x04)    # 继电器 2 = 绿
