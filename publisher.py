@@ -63,15 +63,16 @@ print(f"[启动] 读取    = {STATUS_FILE}\n")
 COLOR_MAP = {
     "GREEN":      "green",
     "YELLOW":     "yellow",
-    "RED_YELLOW": "red",   # 红黄过渡，红灯仍亮，上报 red
+    "RED_YELLOW": "red_yellow",
     "RED":        "red",
-    "OFF":        "red",
+    "OFF":        "off",
 }
 
 last_color = None
 
 while True:
-    color = "red"
+    color = None
+    actual = None
     remaining = 0
     total = 0
     state = "UNKNOWN"
@@ -80,8 +81,8 @@ while True:
     try:
         with open(STATUS_FILE) as f:
             data = json.load(f)
-        actual = data.get("actual", "OFF")
-        color = COLOR_MAP.get(actual, "red")
+        actual = data.get("actual")
+        color = COLOR_MAP.get(actual)
         remaining = int(data.get("remaining", 0))
         total = int(data.get("total", 0))
         state = data.get("state", "UNKNOWN")
@@ -92,6 +93,8 @@ while True:
     payload = {
         "id":               LIGHT_ID,
         "color":            color,
+        "actual":           actual,
+        "feedbackAvailable": color is not None,
         "remainingSeconds": remaining,
         "totalSeconds":     total,
         "state":            state,
@@ -107,10 +110,10 @@ while True:
         )
         if info.rc == mqtt.MQTT_ERR_SUCCESS:
             if color != last_color:
-                print(f"🚦 变灯 → {color.upper():<6s}  倒计时 {remaining}/{total}s  "
+                print(f"🚦 变灯 → {(color or 'UNKNOWN').upper():<6s}  倒计时 {remaining}/{total}s  "
                       f"state={state}  t={time.strftime('%H:%M:%S')}")
             else:
-                print(f"   · heartbeat  {color:<6s}  {remaining}/{total}s  "
+                print(f"   · heartbeat  {(color or 'unknown'):<6s}  {remaining}/{total}s  "
                       f"t={time.strftime('%H:%M:%S')}")
         else:
             print(f"[ERR] 发布失败 rc={info.rc}")

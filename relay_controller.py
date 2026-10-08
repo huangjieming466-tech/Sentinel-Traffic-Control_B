@@ -239,7 +239,7 @@ class RS485RelayController:
             self.ser.write(bytes.fromhex("01 01 00 00 00 08 3D CC"))
             time.sleep(0.05)                # 等继电器处理读命令并回响应
             self.ser.timeout = 0.3          # 足够超时读完 7 字节
-            resp = self.ser.read(7)         # 读线圈响应固定 7 字节
+            resp = self.ser.read(6)         # 读线圈响应固定 6 字节（地址+功能码+字节数+数据+CRC2）
             self.ser.timeout = 0.5          # 恢复默认
             if len(resp) < 5 or resp[0] != 0x01 or resp[1] != 0x01:
                 return None
