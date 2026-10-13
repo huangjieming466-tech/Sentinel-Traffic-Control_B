@@ -75,7 +75,7 @@ TARGET_CLASS_IDS = [2, 3, 5, 7]
 TARGET_CLASS_NAMES = ["car", "motorcycle", "bus", "truck"]
 
 # How often to send detection data to Board A (seconds)
-DET_SEND_INTERVAL = 0.737
+DET_SEND_INTERVAL = 0.5
 
 # Maximum age of Board A light command before fallback
 LIGHT_CMD_TIMEOUT = 1.5
@@ -662,10 +662,30 @@ def main():
         sys.exit(1)
     print("[Relay] B-side traffic light output ready")
 
-    # ── 4. Main Loop ──
+    # ── 4. Relay status monitor thread (independent of main loop) ──
+    relay_state = {"state": "UNKNOWN", "remaining": 0.0}
+
+    def relay_monitor_loop():
+        """后台线程：定期读继电器真实状态并写文件，不阻塞主循环"""
+        while True:
+            actual = relay.read_status() if relay is not None else None
+            try:
+                with open("/tmp/relay_actual.json", "w") as f:
+                    f.write(json.dumps({
+                        "actual": actual,
+                        "state": relay_state["state"],
+                        "remaining": relay_state["remaining"],
+                        "t": time.time(),
+                    }))
+            except Exception:
+                pass
+            time.sleep(1)
+
+    threading.Thread(target=relay_monitor_loop, daemon=True).start()
+
+    # ── 5. Main Loop ──
     frame_count = 0
     last_det_send = 0
-    last_status_write = 0
     fps = 0.0
     fps_smooth = deque(maxlen=30)
 
@@ -737,20 +757,9 @@ def main():
                 else:
                     relay.set_light("RED")
 
-            # ── Periodically read actual relay status (0.5s) → file ──
-            if now - last_status_write > 0.5:
-                last_status_write = now
-                actual = relay.read_status() if relay is not None else None
-                try:
-                    with open("/tmp/relay_actual.json", "w") as f:
-                        f.write(json.dumps({
-                            "actual": actual,
-                            "state": light_state,
-                            "remaining": light_remaining,
-                            "t": now,
-                        }))
-                except Exception:
-                    pass
+            # ── 更新共享状态（供监控线程写文件用）──
+            relay_state["state"] = light_state
+            relay_state["remaining"] = light_remaining
 
             # ── No frame yet / camera down: keep driving lights, skip vision ──
             if not ret or frame is None:
